@@ -32,7 +32,7 @@ val tensorflowVersion = "1.15.0"
 
 val commonSettings = Seq(
   organization := "com.spotify",
-  scalaVersion := "2.13.1",
+  scalaVersion := "2.12.10",
   crossScalaVersions := Seq("2.11.12", "2.12.10", "2.13.1"),
   scalacOptions ++= Seq("-target:jvm-1.8", "-deprecation", "-feature", "-unchecked"),
   scalacOptions ++= (scalaBinaryVersion.value match {
@@ -191,7 +191,8 @@ lazy val guava: Project = project
     moduleName := "magnolify-guava",
     description := "Magnolia add-on for Guava",
     libraryDependencies ++= Seq(
-      "com.google.guava" % "guava" % guavaVersion % Provided
+      "com.spotify" %% "scio-core" % "0.8.0-beta2",
+      "com.google.guava" % "guava" % guavaVersion// % Provided
     )
   )
   .dependsOn(
