@@ -8,7 +8,7 @@ import org.apache.beam.sdk.util.CoderUtils
 import scala.reflect.ClassTag
 
 abstract class ApproxFilter[T] extends Serializable {
-  type Param <: AnyRef
+  type Param
 
   // TODO: overload constructors with default expectedInsertions, fpp, etc.
   // Sub-classes must implement the following constructor
@@ -26,31 +26,8 @@ abstract class ApproxFilter[T] extends Serializable {
 }
 
 object ApproxFilter {
-  def build[F[_] <: ApproxFilter[_]](implicit ct: ClassTag[F[_]]): Builder[F] =
-    new Builder[F](ct)
-
-  class Builder[F[_] <: ApproxFilter[_]](ct: ClassTag[F[_]]) {
-    private val constructor = ct.runtimeClass.getConstructors.find { c =>
-      val cp = c.getParameters
-      cp.length == 4 &&
-        classOf[Iterable[_]].isAssignableFrom(cp(0).getType) &&
-        classOf[Long].isAssignableFrom(cp(1).getType) &&
-        classOf[Double].isAssignableFrom(cp(2).getType)
-      // FIXME: figure out why this is false
-      // param.getClass.isAssignableFrom(cp(3).getType)
-    } match {
-      case Some(c) => c
-      case None => throw new IllegalStateException(
-        s"Missing constructor ${ct.runtimeClass.getSimpleName}(Iterable[T], Long, Double, Param)")
-    }
-
-    def from[T](xs: Iterable[T],
-                expectedInsertions: Long,
-                fpp: Double)(implicit param: F[T]#Param): F[T] =
-      constructor
-        .newInstance(xs, expectedInsertions: java.lang.Long, fpp: java.lang.Double, param)
-        .asInstanceOf[F[T]]
-  }
+  def decode[T, F[_] <: ApproxFilter[_]](in: InputStream): F[T] =
+    new ApproxFilterCoder[T, F]().decode(in)
 }
 
 class ApproxFilterCoder[T, F[_] <: ApproxFilter[_]] extends AtomicCoder[F[T]] {
@@ -65,8 +42,8 @@ class ApproxFilterCoder[T, F[_] <: ApproxFilter[_]] extends AtomicCoder[F[T]] {
 // BloomFilter
 ////////////////////////////////////////////////////////////
 
-class BloomFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double,
-                     val funnel: g.Funnel[T])
+class BloomFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double)(
+  implicit val funnel: BloomFilter[T]#Param)
   extends ApproxFilter[T] {
   override type Param = g.Funnel[T]
 
@@ -97,7 +74,7 @@ class BloomFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double,
 // SetFilter
 ////////////////////////////////////////////////////////////
 
-class SetFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double, val coder: Coder[T])
+class SetFilter[T](elems: Iterable[T])(implicit val coder: SetFilter[T]#Param)
   extends ApproxFilter[T] {
   override type Param = Coder[T]
 
@@ -125,23 +102,20 @@ class SetFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double, va
 ////////////////////////////////////////////////////////////
 
 object Test {
-  def test[F[Int] <: ApproxFilter[Int]](implicit param: F[Int]#Param,
-                                        ct: ClassTag[F[_]]): Unit = {
-    val xs = (1 to 100)
-    val af = ApproxFilter.build[F].from(xs, 1000, 0.01)
-    require(xs.forall(af.mightContain))
 
-    val afCoder = new ApproxFilterCoder[Int, F]()
-    val copy = CoderUtils.clone(afCoder, af)
-
-    require(xs.forall(copy.mightContain))
+  private def test[F[Int] <: ApproxFilter[Int]](f: F[Int]): Unit = {
+    val copy = CoderUtils.clone(new ApproxFilterCoder[Int, F](), f)
+    require((1 to 100).forall(copy.mightContain))
   }
 
   def main(args: Array[String]): Unit = {
     implicit val intFunnel: Funnel[Int] = g.Funnels.integerFunnel().asInstanceOf[g.Funnel[Int]]
     implicit val intCoder: Coder[Int] = VarIntCoder.of().asInstanceOf[Coder[Int]]
 
-    test[BloomFilter]
-    test[SetFilter]
+    val bf = new BloomFilter[Int](1 to 100, 1000, 0.01)
+    val sf = new SetFilter[Int](1 to 100)
+
+    test(bf)
+    test(sf)
   }
 }
