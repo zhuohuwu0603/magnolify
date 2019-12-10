@@ -1,4 +1,4 @@
-import java.io.{InputStream, ObjectInputStream, ObjectOutputStream, OutputStream}
+import java.io.{ByteArrayInputStream, InputStream, ObjectInputStream, ObjectOutputStream, OutputStream}
 
 import com.google.common.hash.Funnel
 import com.google.common.{hash => g}
@@ -26,16 +26,16 @@ abstract class ApproxFilter[T] extends Serializable {
 }
 
 object ApproxFilter {
-  def decode[T, F[_] <: ApproxFilter[_]](in: InputStream): F[T] =
-    new ApproxFilterCoder[T, F]().decode(in)
+  def decode[F <: ApproxFilter[_]](in: InputStream): F =
+    new ApproxFilterCoder[F]().decode(in)
 }
 
-class ApproxFilterCoder[T, F[_] <: ApproxFilter[_]] extends AtomicCoder[F[T]] {
-  override def encode(value: F[T], outStream: OutputStream): Unit =
+class ApproxFilterCoder[F <: ApproxFilter[_]] extends AtomicCoder[F] {
+  override def encode(value: F, outStream: OutputStream): Unit =
     new ObjectOutputStream(outStream).writeObject(value)
 
-  override def decode(inStream: InputStream): F[T] =
-    new ObjectInputStream(inStream).readObject().asInstanceOf[F[T]]
+  override def decode(inStream: InputStream): F =
+    new ObjectInputStream(inStream).readObject().asInstanceOf[F]
 }
 
 ////////////////////////////////////////////////////////////
@@ -102,9 +102,9 @@ class SetFilter[T](elems: Iterable[T])(implicit val coder: SetFilter[T]#Param)
 ////////////////////////////////////////////////////////////
 
 object Test {
-
   private def test[F[Int] <: ApproxFilter[Int]](f: F[Int]): Unit = {
-    val copy = CoderUtils.clone(new ApproxFilterCoder[Int, F](), f)
+    val bytes = CoderUtils.encodeToByteArray(new ApproxFilterCoder[F[Int]](), f)
+    val copy = ApproxFilter.decode[F[Int]](new ByteArrayInputStream(bytes))
     require((1 to 100).forall(copy.mightContain))
   }
 
