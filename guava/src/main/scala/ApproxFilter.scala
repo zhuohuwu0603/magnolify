@@ -1,101 +1,95 @@
 import java.io.{InputStream, ObjectInputStream, ObjectOutputStream, OutputStream}
 
+import com.google.common.hash.Funnel
 import com.google.common.{hash => g}
-import org.apache.beam.sdk.coders.{AtomicCoder, Coder, StringUtf8Coder, VarIntCoder}
+import org.apache.beam.sdk.coders.{AtomicCoder, Coder, VarIntCoder}
 import org.apache.beam.sdk.util.CoderUtils
 
 import scala.reflect.ClassTag
 
-abstract class ApproxFilter[T] {
+abstract class ApproxFilter[T] extends Serializable {
   type Param <: AnyRef
 
-  // Sub-classes must implement the following constructors
-  // def this(in: InputStream)
-  // def this(xs: Iterable[T], numElems: Long, fpp: Double, param: Param)
+  // TODO: overload constructors with default expectedInsertions, fpp, etc.
+  // Sub-classes must implement the following constructor
+  // def this(xs: Iterable[T], expectedInsertions: Long, fpp: Double, param: Param)
 
   def mightContain(value: T): Boolean
   val elementCount: Long
   val expectedFpp: Double
 
-  def writeTo(out: OutputStream): Unit
+  protected def setField(name: String, value: Any): Unit = {
+    val f = getClass.getDeclaredField(name)
+    f.setAccessible(true)
+    f.set(this, value)
+  }
 }
 
 object ApproxFilter {
-  def build[T, F[_] <: ApproxFilter[_]](xs: Iterable[T],
-                                        numElems: Long,
-                                        fpp: Double)(implicit param: F[T]#Param,
-                                                     ct: ClassTag[F[T]]): F[T] = {
-    ct.runtimeClass.getConstructors.find { c =>
+  def build[F[_] <: ApproxFilter[_]](implicit ct: ClassTag[F[_]]): Builder[F] =
+    new Builder[F](ct)
+
+  class Builder[F[_] <: ApproxFilter[_]](ct: ClassTag[F[_]]) {
+    private val constructor = ct.runtimeClass.getConstructors.find { c =>
       val cp = c.getParameters
       cp.length == 4 &&
         classOf[Iterable[_]].isAssignableFrom(cp(0).getType) &&
         classOf[Long].isAssignableFrom(cp(1).getType) &&
-        classOf[Double].isAssignableFrom(cp(2).getType) &&
-        cp(3).getName == "param"
-        // FIXME: figure out why this is false
-        // param.getClass.isAssignableFrom(cp(3).getType)
+        classOf[Double].isAssignableFrom(cp(2).getType)
+      // FIXME: figure out why this is false
+      // param.getClass.isAssignableFrom(cp(3).getType)
     } match {
       case Some(c) => c
-        .newInstance(xs, numElems: java.lang.Long, fpp: java.lang.Double, param)
-        .asInstanceOf[F[T]]
       case None => throw new IllegalStateException(
         s"Missing constructor ${ct.runtimeClass.getSimpleName}(Iterable[T], Long, Double, Param)")
     }
+
+    def from[T](xs: Iterable[T],
+                expectedInsertions: Long,
+                fpp: Double)(implicit param: F[T]#Param): F[T] =
+      constructor
+        .newInstance(xs, expectedInsertions: java.lang.Long, fpp: java.lang.Double, param)
+        .asInstanceOf[F[T]]
   }
-}
-private object ApproxFilterUtils {
-  def readObject[T](in: InputStream): T = new ObjectInputStream(in).readObject().asInstanceOf[T]
-  def writeObject[T](out: OutputStream, obj: T): Unit = new ObjectOutputStream(out).writeObject(obj)
 }
 
 class ApproxFilterCoder[T, F[_] <: ApproxFilter[_]] extends AtomicCoder[F[T]] {
-  private val stringCoder = StringUtf8Coder.of()
-
-  override def encode(value: F[T], outStream: OutputStream): Unit = {
-    stringCoder.encode(value.getClass.getName, outStream)
-    value.writeTo(outStream)
-  }
+  override def encode(value: F[T], outStream: OutputStream): Unit =
+    new ObjectOutputStream(outStream).writeObject(value)
 
   override def decode(inStream: InputStream): F[T] =
-    Class.forName(stringCoder.decode(inStream))
-      .getConstructor(classOf[InputStream])
-      .newInstance(inStream)
-      .asInstanceOf[F[T]]
+    new ObjectInputStream(inStream).readObject().asInstanceOf[F[T]]
 }
 
 ////////////////////////////////////////////////////////////
 // BloomFilter
 ////////////////////////////////////////////////////////////
 
-class BloomFilter[T](val internal: g.BloomFilter[T],
-                     val funnel: g.Funnel[T]) extends ApproxFilter[T] {
+class BloomFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double,
+                     val funnel: g.Funnel[T])
+  extends ApproxFilter[T] {
   override type Param = g.Funnel[T]
-  def this(numElems: Long, fpp: Double, param: g.Funnel[T]) =
-    this(g.BloomFilter.create[T](param, numElems, fpp), param)
 
-  def this(in: InputStream, funnel: g.Funnel[T]) =
-    this(g.BloomFilter.readFrom[T](in, funnel), funnel)
-
-  def this(in: InputStream) = this(in, ApproxFilterUtils.readObject[g.Funnel[T]](in))
-
-  def this(xs: Iterable[T], numElems: Long, fpp: Double, param: g.Funnel[T]) =
-    this(BloomFilter.build(xs, numElems, fpp, param), param)
+  val internal: g.BloomFilter[T] = {
+    val bf = g.BloomFilter.create(funnel, expectedInsertions, fpp)
+    elems.foreach(bf.put)
+    bf
+  }
 
   override def mightContain(value: T): Boolean = internal.mightContain(value)
   override val elementCount: Long = internal.approximateElementCount()
   override val expectedFpp: Double = internal.expectedFpp()
 
-  override def writeTo(out: OutputStream): Unit = {
-    ApproxFilterUtils.writeObject(out, funnel)
+  private def writeObject(out: ObjectOutputStream): Unit = {
+    out.writeObject(funnel)
     internal.writeTo(out)
   }
-}
 
-private object BloomFilter {
-  def build[T](xs: Iterable[T], numElems: Long, fpp: Double, funnel: g.Funnel[T]): g.BloomFilter[T] = {
-    val bf = g.BloomFilter.create(funnel, numElems, fpp)
-    xs.foreach(bf.put)
-    bf
+  private def readObject(in: ObjectInputStream): Unit = {
+    val funnel = in.readObject().asInstanceOf[g.Funnel[T]]
+    val internal = g.BloomFilter.readFrom(in, funnel)
+    setField("funnel", funnel)
+    setField("internal", internal)
   }
 }
 
@@ -103,56 +97,38 @@ private object BloomFilter {
 // SetFilter
 ////////////////////////////////////////////////////////////
 
-class SetFilter[T](val set: Set[T], val coder: Coder[T]) extends ApproxFilter[T] {
+class SetFilter[T](elems: Iterable[T], expectedInsertions: Long, fpp: Double, val coder: Coder[T])
+  extends ApproxFilter[T] {
   override type Param = Coder[T]
 
-  def this(in: InputStream, coder: Coder[T]) =
-    this(SetFilter.readSet(in, coder), coder)
-
-  def this(in: InputStream) = this(in, ApproxFilterUtils.readObject[Coder[T]](in))
-
-  def this(xs: Iterable[T], numElems: Long, fpp: Double, param: Coder[T]) =
-    this(xs.toSet, param)
+  val set: Set[T] = elems.toSet
 
   override def mightContain(value: T): Boolean = set(value)
   override val elementCount: Long = set.size
   override val expectedFpp: Double = 1.0
 
-  override def writeTo(out: OutputStream): Unit = {
-    ApproxFilterUtils.writeObject(out, coder)
-    SetFilter.writeSet(out, coder, set)
-  }
-}
-
-private object SetFilter {
-  private val intCoder = VarIntCoder.of()
-
-  def readSet[T](in: InputStream, coder: Coder[T]): Set[T] = {
-    val size = intCoder.decode(in)
-    var i = 0
-    val builder = Set.newBuilder[T]
-    while (i < size) {
-      builder += coder.decode(in)
-      i += 1
-    }
-    builder.result()
-  }
-
-  def writeSet[T](out: OutputStream, coder: Coder[T], set: Set[T]): Unit = {
-    intCoder.encode(set.size, out)
+  private def writeObject(out: ObjectOutputStream): Unit = {
+    out.writeObject(coder)
+    out.writeInt(set.size)
     set.foreach(coder.encode(_, out))
+  }
+
+  private def readObject(in: ObjectInputStream): Unit = {
+    val coder = in.readObject().asInstanceOf[Coder[T]]
+    val builder = Set.newBuilder[T]
+    (1 to in.readInt()).foreach(_ => builder += coder.decode(in))
+    setField("coder", coder)
+    setField("set", builder.result())
   }
 }
 
 ////////////////////////////////////////////////////////////
 
 object Test {
-  import magnolify.guava.auto._
-
   def test[F[Int] <: ApproxFilter[Int]](implicit param: F[Int]#Param,
-                                        ct: ClassTag[F[Int]]): Unit = {
+                                        ct: ClassTag[F[_]]): Unit = {
     val xs = (1 to 100)
-    val af = ApproxFilter.build[Int, F](xs, 1000, 0.01)
+    val af = ApproxFilter.build[F].from(xs, 1000, 0.01)
     require(xs.forall(af.mightContain))
 
     val afCoder = new ApproxFilterCoder[Int, F]()
@@ -162,8 +138,8 @@ object Test {
   }
 
   def main(args: Array[String]): Unit = {
-    implicit val intFunnel = g.Funnels.integerFunnel().asInstanceOf[g.Funnel[Int]]
-    implicit val intCoder = VarIntCoder.of().asInstanceOf[Coder[Int]]
+    implicit val intFunnel: Funnel[Int] = g.Funnels.integerFunnel().asInstanceOf[g.Funnel[Int]]
+    implicit val intCoder: Coder[Int] = VarIntCoder.of().asInstanceOf[Coder[Int]]
 
     test[BloomFilter]
     test[SetFilter]
