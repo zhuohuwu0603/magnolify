@@ -30,11 +30,10 @@ object GroupDerivation {
       p.typeclass.inverse(p.dereference(a))
     }
 
-    override val empty: T = caseClass.construct(_.typeclass.empty)
+    override val empty: T = MonoidMethods.empty(caseClass)
 
-    override def combine(x: T, y: T): T = caseClass.construct { p =>
-      p.typeclass.combine(p.dereference(x), p.dereference(y))
-    }
+    private val combineImpl = SemigroupMethods.combine(caseClass)
+    override def combine(x: T, y: T): T = combineImpl(x, y)
 
     override def remove(a: T, b: T): T = caseClass.construct { p =>
       p.typeclass.remove(p.dereference(a), p.dereference(b))

@@ -38,9 +38,9 @@ object HashDerivation {
         MurmurHash3.finalizeHash(h, caseClass.parameters.size)
       }
 
-    override def eqv(x: T, y: T): Boolean = caseClass.parameters.forall { p =>
-      p.typeclass.eqv(p.dereference(x), p.dereference(y))
-    }
+    private val eqvImpl = EqMethods.combine(caseClass)
+
+    override def eqv(x: T, y: T): Boolean = eqvImpl(x, y)
   }
 
   def dispatch[T](sealedTrait: SealedTrait[Typeclass, T]): Typeclass[T] = new Hash[T] {
@@ -48,9 +48,9 @@ object HashDerivation {
       sub.typeclass.hash(sub.cast(x))
     }
 
-    override def eqv(x: T, y: T): Boolean = sealedTrait.dispatch(x) { sub =>
-      sub.cast.isDefinedAt(y) && sub.typeclass.eqv(sub.cast(x), sub.cast(y))
-    }
+    private val eqvImpl = EqMethods.dispatch(sealedTrait)
+
+    override def eqv(x: T, y: T): Boolean = eqvImpl(x, y)
   }
 
   implicit def apply[T]: Typeclass[T] = macro Magnolia.gen[T]
